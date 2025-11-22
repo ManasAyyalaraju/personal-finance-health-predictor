@@ -209,5 +209,16 @@ __marimo__/
 # Kaggle API credentials
 kaggle.json
 
-# Note: Large files (CSV, PKL) are tracked with Git LFS
-# Files over 100MB will be automatically handled by LFS
+# Data Science / ML Project
+# Ignore processed data files (can be regenerated from notebooks)
+data/processed/*.csv
+data/processed/*.pkl
+
+# Ignore raw datasets
+data/raw/
+
+# Ignore trained model files (can be regenerated from notebooks)
+models/
+
+# Note: If you need to track specific models/data, use Git LFS
+# Files over 100MB require Git LFS to be pushed to GitHub
