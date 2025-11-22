@@ -208,3 +208,6 @@ __marimo__/
 
 # Kaggle API credentials
 kaggle.json
+
+# Note: Large files (CSV, PKL) are tracked with Git LFS
+# Files over 100MB will be automatically handled by LFS
