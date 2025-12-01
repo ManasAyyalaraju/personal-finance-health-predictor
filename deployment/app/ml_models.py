@@ -525,31 +525,448 @@ class CreditRiskPredictor:
             raise
 
 
+def preprocess_fraud_features(data: Dict[str, Any]) -> pd.DataFrame:
+    """
+    Preprocess fraud detection features to match model expectations.
+    Creates all 44 features including engineered features.
+    Model expects features in this order:
+    Time, V1-V28, Amount, hour, day, amount_scaled, high_amount, hour_bucket,
+    transactions_in_hour, v_feature_magnitude, time_of_day_*, amount_category_*
+    """
+    amount = float(data['transaction_amount'])
+    time = int(data['transaction_time'])
+    v_features = data['features']  # V1-V28
+    
+    # Ensure we have exactly 28 V features
+    if len(v_features) != 28:
+        raise ValueError(f"Expected 28 V features, got {len(v_features)}")
+    
+    # Convert time (seconds since first transaction) to hour and day
+    # Assuming time is in seconds since first transaction
+    total_seconds = time
+    hour = (total_seconds // 3600) % 24
+    day = total_seconds // 86400  # Days since first transaction
+    
+    # Feature Engineering (matching preprocessing notebook)
+    
+    # 1. Hour bucket (categorize hour into buckets)
+    if 0 <= hour < 6:
+        hour_bucket = 0  # Night
+    elif 6 <= hour < 12:
+        hour_bucket = 1  # Morning
+    elif 12 <= hour < 18:
+        hour_bucket = 2  # Afternoon
+    else:
+        hour_bucket = 3  # Evening
+    
+    # 2. Amount scaled (normalized amount, using typical scaling)
+    # Using robust scaling: (x - median) / IQR
+    # For simplicity, using log transform + standardization approximation
+    amount_scaled = np.log1p(amount)  # log(1 + amount) to handle small values
+    
+    # 3. High amount flag
+    high_amount = 1 if amount > 1000 else 0
+    
+    # 4. Amount categories (one-hot encoded)
+    if amount < 100:
+        amount_category_Small = 1
+        amount_category_Medium = 0
+        amount_category_Large = 0
+        amount_category_Very_Large = 0
+    elif amount < 1000:
+        amount_category_Small = 0
+        amount_category_Medium = 1
+        amount_category_Large = 0
+        amount_category_Very_Large = 0
+    elif amount < 5000:
+        amount_category_Small = 0
+        amount_category_Medium = 0
+        amount_category_Large = 1
+        amount_category_Very_Large = 0
+    else:
+        amount_category_Small = 0
+        amount_category_Medium = 0
+        amount_category_Large = 0
+        amount_category_Very_Large = 1
+    
+    # 5. Time of day (one-hot encoded)
+    # Note: Afternoon is the reference category (not included in model)
+    if 6 <= hour < 12:
+        time_of_day_Morning = 1
+        time_of_day_Evening = 0
+        time_of_day_Night = 0
+    elif 12 <= hour < 17:
+        # Afternoon is reference category (all 0s)
+        time_of_day_Morning = 0
+        time_of_day_Evening = 0
+        time_of_day_Night = 0
+    elif 17 <= hour < 22:
+        time_of_day_Morning = 0
+        time_of_day_Evening = 1
+        time_of_day_Night = 0
+    else:
+        time_of_day_Morning = 0
+        time_of_day_Evening = 0
+        time_of_day_Night = 1
+    
+    # 6. V feature magnitude (Euclidean norm of V features)
+    v_magnitude = sum(v**2 for v in v_features) ** 0.5
+    
+    # 7. Transactions in hour (we can't calculate from single transaction, use default)
+    # This would normally be calculated from historical data
+    transactions_in_hour = 1  # Default to 1 for single transaction
+    
+    # Build features in the EXACT order the model expects
+    # Order: Time, V1-V28, Amount, hour, day, amount_scaled, high_amount, hour_bucket,
+    #        transactions_in_hour, v_feature_magnitude, time_of_day_*, amount_category_*
+    
+    # Create ordered list of feature values matching model's expected order
+    feature_values = [
+        time,  # Time
+    ]
+    
+    # Add V1-V28 features
+    for i in range(28):
+        feature_values.append(float(v_features[i]))
+    
+    # Add remaining features in expected order
+    feature_values.extend([
+        amount,  # Amount
+        hour,  # hour
+        day,  # day
+        amount_scaled,  # amount_scaled
+        high_amount,  # high_amount
+        hour_bucket,  # hour_bucket
+        transactions_in_hour,  # transactions_in_hour
+        v_magnitude,  # v_feature_magnitude
+        time_of_day_Evening,  # time_of_day_Evening
+        time_of_day_Morning,  # time_of_day_Morning
+        time_of_day_Night,  # time_of_day_Night
+        amount_category_Small,  # amount_category_Small
+        amount_category_Medium,  # amount_category_Medium
+        amount_category_Large,  # amount_category_Large
+        amount_category_Very_Large,  # amount_category_Very_Large
+    ])
+    
+    # Define column names in the exact order the model expects
+    column_names = [
+        'Time',
+    ]
+    # Add V1-V28
+    column_names.extend([f'V{i+1}' for i in range(28)])
+    # Add remaining columns
+    column_names.extend([
+        'Amount',
+        'hour',
+        'day',
+        'amount_scaled',
+        'high_amount',
+        'hour_bucket',
+        'transactions_in_hour',
+        'v_feature_magnitude',
+        'time_of_day_Evening',
+        'time_of_day_Morning',
+        'time_of_day_Night',
+        'amount_category_Small',
+        'amount_category_Medium',
+        'amount_category_Large',
+        'amount_category_Very_Large',
+    ])
+    
+    # Create DataFrame with explicit column order
+    df = pd.DataFrame([feature_values], columns=column_names)
+    
+    # Verify we have the correct number of features
+    if len(column_names) != len(feature_values):
+        raise ValueError(f"Feature count mismatch: {len(column_names)} columns but {len(feature_values)} values")
+    
+    if len(df.columns) != 44:
+        raise ValueError(f"Expected 44 features, got {len(df.columns)}: {list(df.columns)}")
+    
+    logger.info(f"Created DataFrame with {len(df.columns)} features in order: {list(df.columns)}")
+    
+    return df
+
+
 class FraudDetector:
     """Fraud detection logic"""
     
-    def __init__(self, model):
+    def __init__(self, model, model_loader: Optional[ModelLoader] = None):
         self.model = model
+        self.model_loader = model_loader
+        # Get expected feature names from the model
+        if hasattr(model, 'feature_names_in_'):
+            self.expected_features = list(model.feature_names_in_)
+            logger.info(f"Fraud model expects {len(self.expected_features)} features")
+        elif hasattr(model, 'get_booster'):
+            # For XGBoost models
+            try:
+                booster = model.get_booster()
+                if hasattr(booster, 'feature_names') and booster.feature_names:
+                    self.expected_features = list(booster.feature_names)
+                    logger.info(f"XGBoost fraud model expects {len(self.expected_features)} features")
+                    logger.info(f"XGBoost feature order (first 10): {list(self.expected_features)[:10]}")
+                    logger.info(f"XGBoost feature order (last 10): {list(self.expected_features)[-10:]}")
+                else:
+                    # Try to get from feature_names_in_ if available (scikit-learn wrapper)
+                    if hasattr(model, 'feature_names_in_'):
+                        self.expected_features = list(model.feature_names_in_)
+                        logger.info(f"XGBoost (sklearn wrapper) expects {len(self.expected_features)} features")
+                    else:
+                        self.expected_features = None
+                        logger.warning("XGBoost model does not have feature names stored")
+            except Exception as e:
+                logger.warning(f"Could not get feature names from XGBoost model: {e}")
+                self.expected_features = None
+        else:
+            self.expected_features = None
+            logger.warning("Could not determine fraud model's expected features")
     
     def predict(self, data: Dict[str, Any]) -> Dict[str, Any]:
         """Detect fraud in transaction"""
-        # Prepare features
-        features = pd.DataFrame([{
-            'Amount': data['transaction_amount'],
-            'Time': data['transaction_time'],
-            **{f'V{i+1}': data['features'][i] for i in range(28)}
-        }])
-        
         try:
+            # Log input data to verify it's being received correctly
+            logger.info(f"Received input data:")
+            logger.info(f"  transaction_amount: {data.get('transaction_amount')}")
+            logger.info(f"  transaction_time: {data.get('transaction_time')}")
+            logger.info(f"  features length: {len(data.get('features', []))}")
+            logger.info(f"  V1: {data.get('features', [])[0] if len(data.get('features', [])) > 0 else 'N/A'}")
+            logger.info(f"  V14: {data.get('features', [])[13] if len(data.get('features', [])) > 13 else 'N/A'}")
+            logger.info(f"  V10: {data.get('features', [])[9] if len(data.get('features', [])) > 9 else 'N/A'}")
+            
+            # Preprocess features to match model expectations
+            features = preprocess_fraud_features(data)
+            
+            logger.info(f"Preprocessed features shape: {features.shape}")
+            logger.info(f"Preprocessed feature columns ({len(features.columns)}): {list(features.columns)}")
+            logger.info(f"Sample preprocessed values: Amount={features['Amount'].values[0]}, V1={features['V1'].values[0]}, V14={features['V14'].values[0]}")
+            
+            # Get expected features from model if available
+            if self.expected_features:
+                logger.info(f"Fraud model expects {len(self.expected_features)} features")
+                logger.info(f"Model expected features: {list(self.expected_features)}")
+                
+                # Ensure all expected features are present FIRST
+                missing_features = set(self.expected_features) - set(features.columns)
+                if missing_features:
+                    logger.warning(f"Adding {len(missing_features)} missing features with default 0")
+                    logger.warning(f"Missing features: {list(missing_features)}")
+                    for feat in missing_features:
+                        features[feat] = 0.0
+                
+                # Remove any extra features not expected by the model
+                extra_features = set(features.columns) - set(self.expected_features)
+                if extra_features:
+                    logger.info(f"Removing {len(extra_features)} extra features not in model")
+                    logger.info(f"Extra features: {list(extra_features)}")
+                    features = features.drop(columns=list(extra_features))
+                
+                # Verify we have all expected features before reordering
+                if set(features.columns) != set(self.expected_features):
+                    missing = set(self.expected_features) - set(features.columns)
+                    raise ValueError(f"Missing features before reordering: {missing}. Have: {list(features.columns)}, Need: {list(self.expected_features)}")
+                
+                # CRITICAL: Reorder to match model's expected order
+                # Create new DataFrame with features in exact order expected by model
+                logger.info(f"Reordering features to match model expectations...")
+                logger.info(f"Features before reorder ({len(features.columns)}): {list(features.columns)}")
+                
+                # Extract values in the exact order expected by model and create new DataFrame
+                # This ensures the DataFrame columns are in the exact order XGBoost expects
+                feature_values_ordered = []
+                for feat in self.expected_features:
+                    if feat not in features.columns:
+                        raise ValueError(f"Required feature '{feat}' not found in DataFrame. Available: {list(features.columns)}")
+                    feature_values_ordered.append(features[feat].values[0])
+                
+                # Create new DataFrame with features in exact order expected by model
+                features = pd.DataFrame([feature_values_ordered], columns=self.expected_features)
+                
+                logger.info(f"Features after reorder ({len(features.columns)}): {list(features.columns)}")
+                logger.info(f"Final feature count: {len(features.columns)}, matching model expectations")
+                logger.info(f"Final feature order matches: {list(features.columns) == list(self.expected_features)}")
+                
+                # Final verification
+                if len(features.columns) != len(self.expected_features):
+                    raise ValueError(f"Feature count mismatch: have {len(features.columns)}, need {len(self.expected_features)}")
+                if list(features.columns) != list(self.expected_features):
+                    raise ValueError(f"Feature order mismatch. Have: {list(features.columns)}, Need: {list(self.expected_features)}")
+            else:
+                logger.warning("Model feature names not available, using all features")
+            
+            # Apply scaler if available
+            # NOTE: Apply scaler BEFORE final reordering to ensure scaled values are preserved
+            if self.model_loader and 'fraud_detection_scaler' in self.model_loader._models:
+                scaler = self.model_loader._models['fraud_detection_scaler']
+                # Get the features the scaler expects
+                if hasattr(scaler, 'feature_names_in_'):
+                    scaler_features = list(scaler.feature_names_in_)
+                    logger.info(f"Fraud scaler expects {len(scaler_features)} features")
+                    logger.info(f"Scaler feature order (first 5): {scaler_features[:5]}")
+                    # Check that all scaler features exist in the dataframe
+                    missing_scaler_features = [f for f in scaler_features if f not in features.columns]
+                    if missing_scaler_features:
+                        logger.warning(f"Scaler expects features not in dataframe: {missing_scaler_features}")
+                    else:
+                        logger.info(f"Scaling {len(scaler_features)} features in scaler's expected order")
+                        # Scale only the features the scaler expects, in the exact order it expects
+                        features_to_scale = features[scaler_features]
+                        logger.info(f"Sample values before scaling (first 5): {features_to_scale.iloc[0, :5].values}")
+                        features_scaled = scaler.transform(features_to_scale)
+                        logger.info(f"Sample values after scaling (first 5): {features_scaled[0, :5]}")
+                        # Update the dataframe with scaled values
+                        for i, feat in enumerate(scaler_features):
+                            features[feat] = features_scaled[0, i]
+                        logger.info("Features scaled successfully")
+                else:
+                    logger.warning("Fraud scaler does not have feature_names_in_ attribute, skipping scaling")
+            else:
+                logger.info("No fraud detection scaler found, skipping scaling step")
+            
+            # Final reorder to match model's expected order (critical for XGBoost)
+            if self.expected_features:
+                # CRITICAL: XGBoost requires features in the exact order it was trained with
+                # Extract values in the exact order from model's feature_names
+                feature_values_ordered = []
+                for feat in self.expected_features:
+                    if feat not in features.columns:
+                        raise ValueError(f"Model expects feature '{feat}' but it's not in DataFrame. Available: {list(features.columns)}")
+                    feature_values_ordered.append(features[feat].values[0])
+                
+                # Create DataFrame with features in EXACT order expected by model
+                # XGBoost uses column names to match features, so we need a DataFrame, not numpy array
+                features_final = pd.DataFrame([feature_values_ordered], columns=self.expected_features)
+                
+                logger.info(f"Final DataFrame shape: {features_final.shape}")
+                logger.info(f"Final DataFrame columns ({len(features_final.columns)}): {list(features_final.columns)}")
+                logger.info(f"Feature order matches model: {list(features_final.columns) == list(self.expected_features)}")
+            else:
+                features_final = features
+            
+            # Final verification before prediction
+            if self.expected_features:
+                if len(features_final.columns) != len(self.expected_features):
+                    raise ValueError(
+                        f"Feature count mismatch before prediction: "
+                        f"DataFrame has {len(features_final.columns)} features, "
+                        f"model expects {len(self.expected_features)}. "
+                        f"Expected features: {list(self.expected_features)}"
+                    )
+                if list(features_final.columns) != list(self.expected_features):
+                    raise ValueError(
+                        f"Feature order mismatch before prediction. "
+                        f"Have: {list(features_final.columns)}, "
+                        f"Need: {list(self.expected_features)}"
+                    )
+                logger.info(f"✅ Verified: DataFrame has {len(features_final.columns)} features in correct order")
+            
             # Get prediction
-            proba = self.model.predict_proba(features)[0]
-            fraud_prob = proba[1]  # Probability of fraud
-            is_fraud = fraud_prob > 0.5
+            try:
+                # Log sample feature values before prediction to debug
+                if self.expected_features:
+                    logger.info(f"Sample feature values before prediction:")
+                    logger.info(f"  Time: {features_final['Time'].values[0]}")
+                    logger.info(f"  Amount: {features_final['Amount'].values[0]}")
+                    logger.info(f"  V1: {features_final['V1'].values[0]}")
+                    logger.info(f"  V14: {features_final['V14'].values[0]}")
+                    logger.info(f"  V10: {features_final['V10'].values[0]}")
+                    logger.info(f"  high_amount: {features_final['high_amount'].values[0]}")
+                
+                # Pass DataFrame to XGBoost - it will match features by column names
+                # The DataFrame columns are in the exact order the model expects
+                proba = self.model.predict_proba(features_final)[0]
+                logger.info(f"Fraud prediction successful: proba={proba}, fraud_prob={proba[1]:.6f}")
+            except Exception as e:
+                error_msg = str(e)
+                logger.error(f"Fraud prediction failed: {error_msg}")
+                logger.error(f"Model expects {len(self.expected_features) if self.expected_features else 'unknown'} features")
+                logger.error(f"DataFrame shape: {features_final.shape if 'features_final' in locals() else 'N/A'}")
+                if self.expected_features:
+                    logger.error(f"Expected feature order: {list(self.expected_features)}")
+                    logger.error(f"First 10 expected: {list(self.expected_features)[:10]}")
+                    logger.error(f"Last 10 expected: {list(self.expected_features)[-10:]}")
+                if 'features_final' in locals():
+                    logger.error(f"DataFrame columns ({len(features_final.columns)}): {list(features_final.columns)}")
+                raise
+            
+            fraud_prob = proba[1]  # Probability of fraud from model
+            
+            # Calculate flagged features BEFORE applying adjustments
+            flagged = []
+            has_high_amount = data['transaction_amount'] > 1000
+            has_anomalous_v14 = len(data['features']) > 13 and abs(data['features'][13]) > 2
+            has_anomalous_v10 = len(data['features']) > 9 and abs(data['features'][9]) > 2
+            
+            if has_high_amount:
+                flagged.append("high_amount")
+            if has_anomalous_v14:
+                flagged.append("anomalous_v14")
+            if has_anomalous_v10:
+                flagged.append("anomalous_v10")
+            
+            # Apply rule-based adjustments when multiple suspicious indicators are present
+            # This is a common pattern in fraud detection: combine model predictions with rule-based heuristics
+            original_fraud_prob = fraud_prob
+            flag_count = len(flagged)
+            
+            # Check for extreme feature values that might indicate fraud
+            # If multiple V features have extreme values (|value| > 3), increase suspicion
+            extreme_v_count = sum(1 for v in data['features'] if abs(v) > 3)
+            if extreme_v_count >= 5:  # 5 or more extreme V features
+                fraud_prob = max(fraud_prob, 0.5)
+                if "multiple_extreme_features" not in flagged:
+                    flagged.append("multiple_extreme_features")
+                logger.info(f"Rule-based adjustment: {extreme_v_count} extreme V features detected. "
+                          f"Original prob: {original_fraud_prob:.6f}, Adjusted prob: {fraud_prob:.6f}")
+            
+            # If multiple critical flags are present, increase fraud probability
+            # Priority: 3+ flags > high_amount + anomalous > 2 flags
+            if flag_count >= 3:
+                # Three or more flags: very suspicious - highest priority
+                fraud_prob = max(fraud_prob, 0.7)
+                logger.info(f"Rule-based adjustment: 3+ flags detected (high_amount, anomalous_v14, anomalous_v10). "
+                          f"Original prob: {original_fraud_prob:.6f}, Adjusted prob: {fraud_prob:.6f}")
+            elif flag_count >= 2:
+                # High amount + anomalous V14/V10 is a strong indicator of fraud
+                if has_high_amount and (has_anomalous_v14 or has_anomalous_v10):
+                    # Increase probability significantly when high amount combines with anomalous features
+                    fraud_prob = max(fraud_prob, 0.6)  # At least 60% if model says lower
+                    logger.info(f"Rule-based adjustment: high_amount + anomalous features detected. "
+                              f"Original prob: {original_fraud_prob:.6f}, Adjusted prob: {fraud_prob:.6f}")
+                else:
+                    # Two flags (but not high_amount + anomalous): moderate increase
+                    fraud_prob = max(fraud_prob, min(0.4, original_fraud_prob * 2))
+                    logger.info(f"Rule-based adjustment: 2 flags detected. "
+                              f"Original prob: {original_fraud_prob:.6f}, Adjusted prob: {fraud_prob:.6f}")
+            
+            # Additional check: Very high transaction amounts should always be suspicious
+            if data['transaction_amount'] > 10000:
+                fraud_prob = max(fraud_prob, 0.65)
+                logger.info(f"Rule-based adjustment: Very high transaction amount ({data['transaction_amount']:.2f}) detected. "
+                          f"Adjusted prob: {fraud_prob:.6f}")
+            
+            # Ensure fraud_prob stays in valid range [0, 1]
+            fraud_prob = min(1.0, max(0.0, fraud_prob))
+            
+            # Log final adjusted probability for debugging
+            if abs(fraud_prob - original_fraud_prob) > 0.01:  # Only log if significant change
+                logger.info(f"Final fraud probability after all adjustments: {original_fraud_prob:.6f} -> {fraud_prob:.6f}")
+            
+            # Determine fraud status with adjusted probability
+            # Use lower threshold (0.3) when flags are present, standard (0.5) otherwise
+            fraud_threshold = 0.3 if flag_count >= 2 else 0.5
+            is_fraud = fraud_prob > fraud_threshold
+            
+            logger.info(f"Fraud detection result: is_fraud={is_fraud}, fraud_prob={fraud_prob:.6f}, threshold={fraud_threshold:.2f}, flag_count={flag_count}")
             
             # Risk score (0-100)
             risk_score = int(fraud_prob * 100)
             
-            # Recommendation
+            # Add suspicious_pattern flag if probability is high
+            if fraud_prob > 0.7:
+                flagged.append("suspicious_pattern")
+            
+            # Recommendation based on adjusted probability
             if is_fraud:
                 if fraud_prob > 0.9:
                     recommendation = "BLOCK - High fraud probability. Immediate review required."
@@ -558,14 +975,11 @@ class FraudDetector:
                 else:
                     recommendation = "REVIEW - Moderate risk. Additional authentication recommended."
             else:
-                recommendation = "APPROVE - Low fraud risk. Transaction appears legitimate."
-            
-            # Flagged features (simplified)
-            flagged = []
-            if data['transaction_amount'] > 1000:
-                flagged.append("high_amount")
-            if fraud_prob > 0.7:
-                flagged.append("suspicious_pattern")
+                # Even if not flagged as fraud, high risk should trigger review
+                if fraud_prob > 0.3 or flag_count >= 2:
+                    recommendation = "REVIEW - Multiple risk indicators detected. Additional verification recommended."
+                else:
+                    recommendation = "APPROVE - Low fraud risk. Transaction appears legitimate."
             
             return {
                 "is_fraud": is_fraud,

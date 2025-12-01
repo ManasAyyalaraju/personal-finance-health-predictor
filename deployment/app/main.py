@@ -206,7 +206,7 @@ async def predict_fraud(request: FraudDetectionRequest):
                 detail="Fraud detection model not loaded"
             )
         
-        detector = FraudDetector(model)
+        detector = FraudDetector(model, model_loader)
         result = detector.predict(request.dict())
         
         return result

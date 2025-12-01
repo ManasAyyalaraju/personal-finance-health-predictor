@@ -222,3 +222,11 @@ models/
 
 # Note: If you need to track specific models/data, use Git LFS
 # Files over 100MB require Git LFS to be pushed to GitHub
+
+# OS-specific files
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Jupyter notebook checkpoints (explicit)
+.ipynb_checkpoints/
